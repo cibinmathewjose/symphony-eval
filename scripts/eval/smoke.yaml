@@ -1,0 +1,11 @@
+version: 1
+defaults:
+  model: server-default
+  scoring: contains
+cases:
+  - id: return-window
+    question: How many days do I have to return an unopened item?
+    expectedAnswer: "30 days"
+  - id: product-stock
+    question: How many units of Hand Balm (SKU P63) are in stock? Include the quantity followed by "units" in your answer.
+    expectedAnswer: "12 units"

@@ -1,0 +1,11 @@
+version: 1
+defaults:
+  model: server-default
+  scoring: contains
+cases:
+  - id: return-window
+    question: What is the return policy?
+    expectedAnswer: 30 days
+  - id: help-catalog
+    question: What can you help me with?
+    expectedAnswer: inventory

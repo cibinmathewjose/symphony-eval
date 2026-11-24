@@ -1,0 +1,11 @@
+version: 1
+defaults:
+  model: server-default
+  scoring: contains
+cases:
+  - id: list-inventory
+    question: Show inventory
+    expectedAnswer: Daily Cleanser
+  - id: low-stock-query
+    question: Which products have fewer than 15 units in stock?
+    expectedAnswer: Night Cream

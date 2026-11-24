@@ -1,0 +1,20 @@
+version: 1
+defaults:
+  model: server-default
+  scoring: contains
+cases:
+  - id: inventory-product
+    question: Show inventory
+    expectedAnswer: Daily Cleanser
+
+  - id: return-policy-completeness
+    question: What is the return policy?
+    scoring: llm-judge
+    judgeModel: model-router
+    passThreshold: 1.0
+    expectedAnswer: |
+      Unopened sample products can be returned within 30 days with a receipt.
+    rubric: |
+      The answer must preserve the unopened sample product condition, the 30-day
+      window, and the receipt requirement. Treat omissions or contradictions of
+      these facts as critical. Ignore wording and formatting differences.

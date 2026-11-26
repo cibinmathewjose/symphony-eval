@@ -31,7 +31,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.TextNode;
 
-/** Evaluates one-shot requests against the Symphony Demo chat SSE endpoint. */
+/** Evaluates one-shot requests against a chat SSE endpoint. */
 public final class DemoStreamingAdapter implements EvaluationRunner.AnswerProvider {
     private static final String SSE = "text/event-stream";
     private static final int MAX_STREAM_BYTES = 8 * 1024 * 1024;
@@ -63,8 +63,8 @@ public final class DemoStreamingAdapter implements EvaluationRunner.AnswerProvid
 
     @Override
     public JsonNode answer(EvaluationRunner.Request input) throws IOException, InterruptedException {
-        var payload = JSON.createObjectNode().put("sessionId", UUID.randomUUID().toString())
-                .put("message", input.question());
+        var payload = input.requestBody() != null ? input.requestBody()
+            : JSON.createObjectNode().put("sessionId", UUID.randomUUID().toString()).put("message", input.question());
         var request = HttpRequest.newBuilder(endpoint).header("Content-Type", "application/json").header("Accept", SSE);
         authentication.accept(request);
         var exchange = client.sendAsync(request.POST(HttpRequest.BodyPublishers.ofByteArray(

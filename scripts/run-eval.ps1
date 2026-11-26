@@ -23,7 +23,7 @@ try {
     $settings = @{}
     if ($hasDotenv) {
         foreach ($line in Get-Content -LiteralPath $dotenv -Encoding UTF8) {
-            if ($line -match '^\s*(?:export\s+)?(AZURE_OPENAI_ENDPOINT|AZURE_OPENAI_API_KEY|SYMPHONY_EVAL_ADAPTER|SYMPHONY_EVAL_ENDPOINT|SYMPHONY_EVAL_JUDGE_MODEL|SYMPHONY_EVAL_HEADER_KEY|SYMPHONY_EVAL_HEADER_VALUE)\s*=\s*(.*?)\s*$') {
+            if ($line -match '^\s*(?:export\s+)?(AZURE_OPENAI_ENDPOINT|AZURE_OPENAI_API_KEY|SYMPHONY_EVAL_ADAPTER|SYMPHONY_EVAL_ENDPOINT|SYMPHONY_EVAL_JUDGE_MODEL|SYMPHONY_EVAL_HEADER_KEY|SYMPHONY_EVAL_HEADER_VALUE|SYMPHONY_EVAL_REQUEST_BODY)\s*=\s*(.*?)\s*$') {
                 $value = $Matches[2]
                 if ($value.Length -ge 2 -and ($value[0] -eq '"' -or $value[0] -eq "'") -and $value[0] -eq $value[-1]) {
                     $value = $value.Substring(1, $value.Length - 2)
@@ -41,6 +41,11 @@ try {
         if ([string]::IsNullOrWhiteSpace($env:SYMPHONY_EVAL_JUDGE_MODEL) -and
             -not [string]::IsNullOrWhiteSpace($settings['SYMPHONY_EVAL_JUDGE_MODEL'])) {
             $env:SYMPHONY_EVAL_JUDGE_MODEL = $settings['SYMPHONY_EVAL_JUDGE_MODEL'].Trim()
+        }
+
+        if ([string]::IsNullOrWhiteSpace($env:SYMPHONY_EVAL_REQUEST_BODY) -and
+            -not [string]::IsNullOrWhiteSpace($settings['SYMPHONY_EVAL_REQUEST_BODY'])) {
+            $env:SYMPHONY_EVAL_REQUEST_BODY = $settings['SYMPHONY_EVAL_REQUEST_BODY']
         }
 
         # Keep the Azure key paired with the endpoint it belongs to. Explicit judge settings win as a pair.

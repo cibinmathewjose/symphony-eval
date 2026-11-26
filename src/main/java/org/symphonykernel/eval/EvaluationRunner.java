@@ -14,6 +14,7 @@ import org.symphonykernel.eval.EvaluationReport.Status;
 
 import com.fasterxml.jackson.core.JsonPointer;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 /** Executes a validated suite sequentially through a caller-supplied application adapter. */
 public final class EvaluationRunner {
@@ -23,6 +24,7 @@ public final class EvaluationRunner {
     private final AnswerProvider provider;
     private final Map<String, Scorer> scorers;
     private final String fallbackJudgeModel;
+    private final ObjectNode defaultRequestBody;
 
     public EvaluationRunner(AnswerProvider provider) {
         this(provider, Map.of());
@@ -33,9 +35,15 @@ public final class EvaluationRunner {
     }
 
     EvaluationRunner(AnswerProvider provider, Map<String, Scorer> customScorers, String fallbackJudgeModel) {
+        this(provider, customScorers, fallbackJudgeModel, null);
+    }
+
+    EvaluationRunner(AnswerProvider provider, Map<String, Scorer> customScorers, String fallbackJudgeModel,
+                     ObjectNode defaultRequestBody) {
         this.provider = Objects.requireNonNull(provider, "provider");
         this.fallbackJudgeModel = fallbackJudgeModel == null || fallbackJudgeModel.isBlank()
                 ? null : fallbackJudgeModel.strip();
+        this.defaultRequestBody = defaultRequestBody == null ? null : defaultRequestBody.deepCopy();
         Map<String, Scorer> registry = new HashMap<>();
         registry.put(EXACT, (request, expected, actual) -> match(expected.isTextual() && actual.isTextual()
                 ? expected.textValue().strip().equals(actual.textValue().strip()) : expected.equals(actual)));
@@ -114,7 +122,8 @@ public final class EvaluationRunner {
             if (LlmJudgeScorer.NAME.equals(scoring)) {
                 judgeModel = choose(nonBlank(item.judgeModel()), choose(nonBlank(defaults.judgeModel()), fallbackJudgeModel));
             }
-            var request = new Request(id, question, model);
+                var request = new Request(id, question, model,
+                    RequestBodyTemplate.resolve(id, question, model, defaultRequestBody, defaults.requestBody(), item.requestBody()));
             scorers.get(scoring).validate(new ScoringRequest(request, judgeModel, item.rubric()), threshold);
             JsonNode expected = item.expectedAnswer();
             if (expected == null || expected.isMissingNode()) {
@@ -157,7 +166,8 @@ public final class EvaluationRunner {
         } catch (Exception error) {
             // Exception messages can contain credentials or request payloads.
             String phase = actual == null ? "Application execution" : "Scoring";
-            return result(item, actual, new Score(0, phase + " failed (" + error.getClass().getName() + ")"),
+            String detail = error instanceof LlmJudgeScorer.JudgeException ? error.getMessage() : error.getClass().getName();
+            return result(item, actual, new Score(0, phase + " failed (" + detail + ")"),
                     Status.ERROR, start);
         }
     }
@@ -196,7 +206,11 @@ public final class EvaluationRunner {
     private record PreparedCase(Request request, String scoring, double threshold, JsonPointer pointer,
                                 JsonNode expected, String judgeModel, String rubric) { }
 
-    public record Request(String caseId, String question, String model) { }
+    public record Request(String caseId, String question, String model, ObjectNode requestBody) {
+        public Request(String caseId, String question, String model) {
+            this(caseId, question, model, null);
+        }
+    }
 
     public record ScoringRequest(Request answerRequest, String judgeModel, String rubric) { }
 

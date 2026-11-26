@@ -26,6 +26,78 @@ class EvaluationBatchTest {
     Path temp;
 
     @Test
+    void bothTransportsSendOnlyResolvedCustomFieldsAndTargetAuth() throws Exception {
+        var mapper = new ObjectMapper();
+        var requests = new LinkedBlockingQueue<JsonNode>();
+        var headers = new LinkedBlockingQueue<String>();
+        var server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        server.createContext("/chat", exchange -> {
+            try (exchange) {
+                requests.add(mapper.readTree(exchange.getRequestBody()));
+                headers.add(String.valueOf(exchange.getRequestHeaders().getFirst("X-Test-Key")));
+                headers.add(String.valueOf(exchange.getRequestHeaders().getFirst("Authorization")));
+                boolean stream = "text/event-stream".equals(exchange.getRequestHeaders().getFirst("Accept"));
+                exchange.getResponseHeaders().set("Content-Type", stream ? "text/event-stream" : "application/json");
+                byte[] body = (stream ? "data: {\"eventType\":\"content\",\"content\":\"yes\"}\n\n" : "\"yes\"")
+                        .getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, body.length);
+                exchange.getResponseBody().write(body);
+            }
+        });
+        server.start();
+        try (var out = new PrintStream(OutputStream.nullOutputStream())) {
+            var root = temp.resolve("custom").toString();
+            var source = temp.resolve("suite.yaml");
+            var address = server.getAddress();
+            var endpoint = new URI("http", null, address.getAddress().getHostAddress(), address.getPort(), "/chat", null, null);
+            String envUrl = "https://example.com/records/101";
+            String suiteUrl = "https://example.com/records/202";
+            String caseUrl = "https://example.com/records/A%2F1?type=record#tab=1";
+                Files.writeString(source, String.join("\n", "version: 1",
+                    "defaults: {requestBody: {page: '%s', limit: 20}}".formatted(suiteUrl), "cases:",
+                    "  - id: override", "    question: 'Question?'", "    model: test-model", "    expectedAnswer: 'yes'",
+                    "    requestBody: {page: '%s', limit: null, engine: '${model}', caseTag: '${caseId}'}".formatted(caseUrl),
+                    "  - {id: inherit, question: 'Question?', expectedAnswer: 'yes'}", ""));
+            assertEquals(0, EvaluationCli.execute(new String[]{root, "add", "suite", source.toString()}, out, System.err, null));
+            Files.writeString(source, """
+                    version: 1
+                    cases:
+                      - {id: fallback, question: 'Question?', expectedAnswer: 'yes'}
+                    """);
+            assertEquals(0, EvaluationCli.execute(new String[]{root, "add", "environment", source.toString()}, out, System.err, null));
+
+                String environment = """
+                    {"page":"%s","input":{"text":"${question}","clientIds":["${sessionId}"]},"limit":10,"active":true}
+                    """.formatted(envUrl);
+                for (String adapter : new String[]{"sse", "json"}) {
+                var report = temp.resolve(adapter + ".json");
+                var args = new String[]{root, "run-all", adapter, endpoint.toString(), report.toString()};
+                assertEquals(0, EvaluationCli.execute(args, out, System.err, "target-bearer", null, "judge-secret", null,
+                        "X-Test-Key", "target-key", environment));
+                var sessions = new java.util.HashSet<UUID>();
+                for (String expectedUrl : new String[]{envUrl, caseUrl, suiteUrl}) {
+                    var body = requests.remove();
+                    boolean overridden = expectedUrl.equals(caseUrl);
+                    assertEquals(expectedUrl, body.path("page").asText());
+                    assertEquals("Question?", body.at("/input/text").asText());
+                    assertTrue(sessions.add(UUID.fromString(body.at("/input/clientIds/0").asText())));
+                    assertTrue(body.path("active").isBoolean());
+                    assertEquals(overridden ? "null" : expectedUrl.equals(envUrl) ? "10" : "20", body.path("limit").toString());
+                    assertEquals(overridden ? 6 : 4, body.size());
+                    assertFalse(body.has("userToken"));
+                    assertFalse(body.has("expectedAnswer"));
+                    assertEquals(overridden ? "test-model" : "", body.path("engine").asText());
+                    assertEquals(overridden ? "override" : "", body.path("caseTag").asText());
+                    assertEquals("target-key", headers.remove());
+                    assertEquals("null", headers.remove());
+                }
+            }
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void runsEveryRegisteredDemoSuiteAndReportsFailures() throws Exception {
         var mapper = new ObjectMapper();
         var requests = new LinkedBlockingQueue<JsonNode>();

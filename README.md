@@ -54,9 +54,33 @@ Create a suite per use case, or group related use cases into one suite. `add` va
 
 Add questions, expected answers, and scoring settings in YAML, not Java. The CLI sends each question to the configured API and never dispatches on the case ID. The Maven unit tests exercise the evaluator itself using canned responses; they do not evaluate application knowledge or call an LLM.
 
-The target endpoint can be an existing matching API or a small adapter. It must accept a JSON `POST` with `caseId`, `question`, `model`, and a fresh `sessionId`. Expected answers are never sent. Route the request through the configured application use case (for example via a use-case-specific endpoint or the normal question router) and return the final answer as JSON: a quoted string, a structured value, or a response envelope selected by `answerPointer`. Non-2xx and invalid JSON responses produce case errors. Set `SYMPHONY_EVAL_TOKEN` for optional bearer authentication and use HTTPS for remote endpoints. The client does not follow redirects and uses a 60-second request timeout. Use the embedded API for custom adapters or scorers.
+The target endpoint can be an existing API or a small adapter. By default, the `json` adapter sends a JSON `POST` with `caseId`, `question`, `model`, and a fresh `sessionId`. Use `requestBody` below if the API expects a different shape. Expected answers are never sent automatically. Route the request through the configured application use case (for example via a use-case-specific endpoint or the normal question router) and return the final answer as JSON: a quoted string, a structured value, or a response envelope selected by `answerPointer`. Non-2xx and invalid JSON responses produce case errors. Set `SYMPHONY_EVAL_TOKEN` for optional bearer authentication and use HTTPS for remote endpoints. The client does not follow redirects and uses a 60-second request timeout. Use the embedded API for custom adapters or scorers.
 
 The workspace is a local file archive, not a server or dashboard. Back it up or persist it across CI runs if history should be retained. Limit access and keep it out of source control: suites and run reports may contain sensitive data.
+
+When the CLI encounters a validation or execution error, or a case fails scoring, it creates a separate JSON-lines `evaluation-errors-*.log` under the workspace's `logs` folder and prints the path to stderr. For the default Windows launcher, find it under `.eval-workspace/logs` beside the launcher. A CLI error before a workspace can be identified uses `.eval-logs` in the current directory. Logs identify the suite and case where available. Judge errors include safe diagnostics such as the HTTP status or why a verdict was rejected. The log does not copy credentials, raw exception messages, questions, answers, or provider response bodies.
+
+### Configure the request body for any target
+
+Use `requestBody` in suite `defaults` or on individual cases to match your application's JSON API. The same configuration works with `sse` and `json`. Only the fields in the resolved object are sent; the usual adapter body is used only when no `requestBody` is configured.
+
+Optionally set `SYMPHONY_EVAL_REQUEST_BODY` to a single-line JSON object in the launcher `.env` or process environment. For example:
+
+```dotenv
+SYMPHONY_EVAL_REQUEST_BODY={"fromUrl":"https://app.example.com/items/12345"}
+```
+
+Top-level fields are merged with precedence **case → suite defaults → environment object**. The launcher uses the dotenv object only if the process variable is unset or blank. Overriding a field replaces its entire value, including nested objects and arrays; an explicit null is sent as JSON null. URLs are sent as data, not fetched. Keep credentials out of request templates; use target authentication headers. `SYMPHONY_EVAL_JUDGE_TOKEN` is for the scoring service only.
+
+```yaml
+version: 1
+defaults:
+  requestBody: {query: '${question}', session: '${sessionId}', key: CHAT, fromUrl: 'https://app.example.com/items/23456'}
+cases:
+  - {id: item-status, question: 'What is the status of this item?', scoring: contains, expectedAnswer: 'Approved', requestBody: {fromUrl: 'https://app.example.com/items/34567', options: {includeHistory: false, limit: 5}}}
+```
+
+Available placeholders are `${question}`, `${sessionId}` (a fresh UUID per case), `${caseId}`, and `${model}`. They are replaced only when they are the entire string value, including inside objects and arrays. Other values are preserved. For a JSON response envelope, select the answer with `answerPointer` (for example, `/message`). For explicit CLI runs, pass the adapter after the endpoint for `run`, or before the endpoint for `run-all`.
 
 ### Run all suites against Symphony Demo
 
@@ -93,7 +117,7 @@ For in-process use, add `org.symphonykernel:symphony-eval:1.1.1-SNAPSHOT` to the
 
 ## Run a suite
 
-The adapter receives only the case ID, question, and model, never the expected answer. Create a fresh session per case. In a Symphony application with an injected `KnowledgeGraphBuilder graph`, a one-shot adapter can use the normal non-streaming request path:
+The adapter receives the case ID, question, model, and optional resolved `requestBody`, never the expected answer. Create a fresh session per case. In a Symphony application with an injected `KnowledgeGraphBuilder graph`, a one-shot adapter can use the normal non-streaming request path:
 
 ```java
 import java.nio.file.Path;

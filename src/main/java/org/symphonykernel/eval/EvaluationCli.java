@@ -20,8 +20,9 @@ import java.util.UUID;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
-/** Standalone command line for JSON and Symphony Demo streaming evaluations. */
+/** Standalone command line for JSON and SSE evaluations. */
 public final class EvaluationCli {
     private static final String JUDGE_URL = "SYMPHONY_EVAL_JUDGE_URL";
     private static final String JUDGE_MODEL = "SYMPHONY_EVAL_JUDGE_MODEL";
@@ -33,13 +34,16 @@ public final class EvaluationCli {
               add <suite-id> <source-yaml>      Register a new suite
               update <suite-id> <source-yaml>   Replace suite; keep history
               list                             List registered suites
-              run <suite-id> <endpoint-url>    Execute and archive a suite
-              run-all <sse|json> <endpoint-url> <report-json>
+              run <suite-id> <endpoint-url> [adapter]
+                                               Execute and archive a suite (default: json)
+              run-all <adapter> <endpoint-url> <report-json>
                                                Run all suites and write JSON and HTML reports
               history <suite-id>               Show run summaries, newest first
               show <suite-id> <run-id>         Print one detailed run as JSON
             SYMPHONY_EVAL_TOKEN: optional bearer token for target requests
             SYMPHONY_EVAL_HEADER_KEY and SYMPHONY_EVAL_HEADER_VALUE: custom auth header for target requests
+            Adapters: sse, json
+            SYMPHONY_EVAL_REQUEST_BODY: optional JSON request body defaults; YAML requestBody fields override them
             LLM judge: SYMPHONY_EVAL_JUDGE_URL (or judge.url in config) and optional SYMPHONY_EVAL_JUDGE_TOKEN
             SYMPHONY_EVAL_JUDGE_MODEL: default model for llm-judge cases without a YAML judgeModel
             """;
@@ -69,11 +73,24 @@ public final class EvaluationCli {
 
         static int execute(String[] args, PrintStream out, PrintStream err, String token, String judgeUrl, String judgeToken,
                    String judgeModel, String headerKey, String headerValue) {
+        return execute(args, out, err, token, judgeUrl, judgeToken, judgeModel, headerKey, headerValue,
+            System.getenv("SYMPHONY_EVAL_REQUEST_BODY"));
+        }
+
+        static int execute(String[] args, PrintStream out, PrintStream err, String token, String judgeUrl, String judgeToken,
+                   String judgeModel, String headerKey, String headerValue, String requestBody) {
         if (args.length == 1 && ("--help".equals(args[0]) || "-h".equals(args[0]))) {
             out.print(USAGE);
             return 0;
         }
+        var errorLog = new EvaluationErrorLog(err);
+        String command = "invocation";
+        String suiteId = null;
         try {
+            int workspaceIndex = args.length > 0 && "--config".equals(args[0]) ? 2 : 0;
+            if (args.length > workspaceIndex) {
+                errorLog.setWorkspace(Path.of(args[workspaceIndex]));
+            }
             if (args.length > 0 && "--config".equals(args[0])) {
                 if (args.length < 4) {
                     throw new IllegalArgumentException("Expected --config <properties-file> followed by a workspace and command");
@@ -83,6 +100,14 @@ public final class EvaluationCli {
             }
             if (args.length < 2) {
                 throw new IllegalArgumentException("Expected a workspace and command");
+            }
+            command = switch (args[1]) {
+                case "add", "update", "list", "run", "history", "run-all", "show" -> args[1];
+                default -> "invocation";
+            };
+            if (args.length > 2 && ("add".equals(command) || "update".equals(command) || "run".equals(command))
+                    && args[2].matches("[a-z0-9][a-z0-9_-]{0,63}")) {
+                suiteId = args[2];
             }
             var workspace = new EvaluationWorkspace(Path.of(args[0]));
             return switch (args[1]) {
@@ -105,9 +130,12 @@ public final class EvaluationCli {
                     yield 0;
                 }
                 case "run" -> {
-                    requireCount(args, 4);
-                    var provider = httpProvider(args[3], token, headerKey, headerValue);
-                    var run = workspace.execute(args[2], runner(provider, judgeUrl, judgeToken, judgeModel));
+                    if (args.length != 5) {
+                        requireCount(args, 4);
+                    }
+                    var provider = targetProvider(args.length == 5 ? args[4] : "json", args[3], token, headerKey, headerValue);
+                    var run = workspace.execute(args[2], runner(provider, judgeUrl, judgeToken, judgeModel, requestBody));
+                    errorLog.record(run);
                     printSummary(out, run.metadata());
                     yield run.report().successful() ? 0 : 1;
                 }
@@ -122,16 +150,9 @@ public final class EvaluationCli {
                 }
                 case "run-all" -> {
                     requireCount(args, 5);
-                    var provider = switch (args[2]) {
-                        case "json" -> httpProvider(args[3], token, headerKey, headerValue);
-                        case "sse", "demo-stream" -> {
-                            URI endpoint = URI.create(args[3]);
-                            yield new DemoStreamingAdapter(endpoint, REQUEST_TIMEOUT,
-                                    targetAuthentication(endpoint, token, headerKey, headerValue));
-                        }
-                        default -> throw new IllegalArgumentException("Unknown adapter: " + args[2]);
-                    };
-                    yield runAll(workspace, runner(provider, judgeUrl, judgeToken, judgeModel), args[2], Path.of(args[4]), out, err);
+                    var provider = targetProvider(args[2], args[3], token, headerKey, headerValue);
+                        yield runAll(workspace, runner(provider, judgeUrl, judgeToken, judgeModel, requestBody),
+                            args[2], Path.of(args[4]), out, err, errorLog);
                 }
                 case "show" -> {
                     requireCount(args, 4);
@@ -142,13 +163,16 @@ public final class EvaluationCli {
                 default -> throw new IllegalArgumentException("Unknown command: " + args[1]);
             };
         } catch (IllegalArgumentException ex) {
+            errorLog.error(command + " validation", suiteId, ex);
             err.println(ex.getMessage());
             err.print(USAGE);
             return 2;
         } catch (IOException ex) {
+            errorLog.error(command, suiteId, ex);
             err.println("Evaluation workspace error: " + ex.getMessage());
             return 2;
         } catch (InterruptedException ex) {
+            errorLog.error(command, suiteId, ex);
             Thread.currentThread().interrupt();
             err.println("Evaluation interrupted");
             return 2;
@@ -167,10 +191,24 @@ public final class EvaluationCli {
     }
 
     private static EvaluationRunner runner(EvaluationRunner.AnswerProvider provider, String url, String token,
-                                           String judgeModel) {
+                                           String judgeModel, String requestBody) {
         EvaluationRunner.Scorer judge = url == null || url.isBlank() ? new JudgeConfigurationCheck(false)
                 : new LlmJudgeScorer(URI.create(url), token, REQUEST_TIMEOUT);
-        return new EvaluationRunner(provider, Map.of(LlmJudgeScorer.NAME, judge), judgeModel);
+        return new EvaluationRunner(provider, Map.of(LlmJudgeScorer.NAME, judge), judgeModel, parseRequestBody(requestBody));
+    }
+
+    private static ObjectNode parseRequestBody(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            if (JSON.reader().with(DeserializationFeature.FAIL_ON_READING_DUP_TREE_KEY).readTree(value) instanceof ObjectNode body) {
+                return body;
+            }
+        } catch (IOException invalidJson) {
+            // Do not echo configuration values in CLI errors.
+        }
+        throw new IllegalArgumentException("SYMPHONY_EVAL_REQUEST_BODY must be a valid JSON object with unique keys");
     }
 
     private record JudgeConfigurationCheck(boolean registrationOnly) implements EvaluationRunner.Scorer {
@@ -178,7 +216,7 @@ public final class EvaluationCli {
         public void validate(EvaluationRunner.ScoringRequest request, double threshold) {
             LlmJudgeScorer.validateCase(request, threshold);
             if (!registrationOnly) {
-                throw new IllegalArgumentException("Set SYMPHONY_EVAL_JUDGE_URL or supply --config with judge.url before running llm-judge cases");
+                throw new EvaluationErrorLog.MissingJudgeConfiguration();
             }
         }
 
@@ -190,7 +228,7 @@ public final class EvaluationCli {
     }
 
     private static int runAll(EvaluationWorkspace workspace, EvaluationRunner runner, String adapter, Path output,
-                              PrintStream out, PrintStream err) throws IOException, InterruptedException {
+                              PrintStream out, PrintStream err, EvaluationErrorLog errorLog) throws IOException, InterruptedException {
         List<String> ids = workspace.listSuites();
         if (ids.isEmpty()) {
             throw new IllegalArgumentException("No registered suites; add a suite before running evaluations");
@@ -209,9 +247,11 @@ public final class EvaluationCli {
             for (String id : ids) {
                 try {
                     var run = workspace.execute(id, runner);
+                    errorLog.record(run);
                     runs.add(run);
                     printSummary(out, run.metadata());
                 } catch (IOException | IllegalArgumentException failed) {
+                    errorLog.error(failed instanceof IllegalArgumentException ? "suite validation" : "suite execution", id, failed);
                     errors.add(new SuiteError(id, failed.getClass().getSimpleName()));
                     err.println("Could not complete suite: " + id);
                 }
@@ -239,8 +279,20 @@ public final class EvaluationCli {
     record BatchReport(int version, String adapter, String startedAt, String finishedAt, boolean successful,
                                List<EvaluationWorkspace.Run> runs, List<SuiteError> suiteErrors) { }
 
+    private static EvaluationRunner.AnswerProvider targetProvider(String adapter, String endpoint, String token,
+                                                                   String headerKey, String headerValue) {
+        return switch (adapter) {
+            case "json" -> httpProvider(endpoint, token, headerKey, headerValue);
+            case "sse", "demo-stream" -> {
+                URI uri = URI.create(endpoint);
+                yield new DemoStreamingAdapter(uri, REQUEST_TIMEOUT, targetAuthentication(uri, token, headerKey, headerValue));
+            }
+            default -> throw new IllegalArgumentException("Unknown adapter: " + adapter);
+        };
+    }
+
     private static EvaluationRunner.AnswerProvider httpProvider(String endpoint, String token,
-                                                                 String headerKey, String headerValue) {
+                                                             String headerKey, String headerValue) {
         URI uri = URI.create(endpoint);
         if (!("https".equalsIgnoreCase(uri.getScheme()) || "http".equalsIgnoreCase(uri.getScheme()))
                 || uri.getHost() == null || uri.getUserInfo() != null || uri.getFragment() != null) {
@@ -250,8 +302,9 @@ public final class EvaluationCli {
         var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10))
             .followRedirects(HttpClient.Redirect.NEVER).build();
         return input -> {
-            byte[] body = JSON.writeValueAsBytes(Map.of("caseId", input.caseId(), "question", input.question(),
-                "model", input.model(), "sessionId", "eval-" + UUID.randomUUID()));
+                byte[] body = JSON.writeValueAsBytes(input.requestBody() != null ? input.requestBody()
+                    : Map.of("caseId", input.caseId(), "question", input.question(),
+                        "model", input.model(), "sessionId", "eval-" + UUID.randomUUID()));
             var request = HttpRequest.newBuilder(uri).timeout(REQUEST_TIMEOUT)
                 .header("Content-Type", "application/json").header("Accept", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofByteArray(body));

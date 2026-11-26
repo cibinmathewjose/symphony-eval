@@ -85,20 +85,36 @@ public final class LlmJudgeScorer implements EvaluationRunner.Scorer {
         }
         var response = client.send(http.build(), HttpResponse.BodyHandlers.ofByteArray());
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            throw new IOException("Judge returned an unsuccessful HTTP status");
+            throw new JudgeException("Judge returned HTTP " + response.statusCode());
         }
-        var envelope = JSON.readTree(response.body());
+        JsonNode envelope;
+        try {
+            envelope = JSON.readTree(response.body());
+        } catch (IOException invalid) {
+            throw new JudgeException("Judge response is not valid JSON", invalid);
+        }
         if (envelope == null || !envelope.isObject()) {
-            throw new IOException("Invalid judge response envelope");
+            throw new JudgeException("Invalid judge response envelope");
         }
         var choice = envelope.path("choices").path(0);
         var content = choice.path("message").path("content");
         if (!"stop".equals(choice.path("finish_reason").asText()) || !content.isTextual()) {
-            throw new IOException("Missing or incomplete judge verdict");
+            String reason = switch (choice.path("finish_reason").asText()) {
+                case "length" -> "output limit reached";
+                case "content_filter" -> "content filter";
+                case "stop" -> "missing text content";
+                default -> "missing or unsupported finish reason";
+            };
+            throw new JudgeException("Missing or incomplete judge verdict: " + reason);
         }
-        var verdict = JSON.readTree(content.textValue());
+        JsonNode verdict;
+        try {
+            verdict = JSON.readTree(content.textValue());
+        } catch (IOException invalid) {
+            throw new JudgeException("Judge verdict is not valid JSON", invalid);
+        }
         if (verdict == null || !verdict.isObject() || verdict.size() != 3) {
-            throw new IOException("Invalid judge verdict");
+            throw new JudgeException("Invalid judge verdict: expected three fields");
         }
         var value = verdict.path("score");
         var critical = verdict.path("criticalFailure");
@@ -106,8 +122,18 @@ public final class LlmJudgeScorer implements EvaluationRunner.Scorer {
         if (!value.isNumber() || !critical.isBoolean()
                 || !detail.isTextual() || detail.textValue().isBlank() || detail.textValue().length() > 1000
                 || !Double.isFinite(value.doubleValue()) || value.doubleValue() < 0 || value.doubleValue() > 1) {
-            throw new IOException("Invalid judge verdict");
+            throw new JudgeException("Invalid judge verdict: invalid score, criticalFailure or detail");
         }
         return new EvaluationRunner.Score(critical.booleanValue() ? 0 : value.doubleValue(), detail.textValue());
+    }
+
+    static final class JudgeException extends IOException {
+        private JudgeException(String message) {
+            super(message);
+        }
+
+        private JudgeException(String message, IOException cause) {
+            super(message, cause);
+        }
     }
 }

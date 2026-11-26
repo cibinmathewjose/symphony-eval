@@ -11,6 +11,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -62,6 +63,13 @@ class LlmJudgeScorerTest {
                 reply(exchange, envelope);
             }
         });
+        server.createContext("/rejected", exchange -> {
+            try (exchange) {
+                byte[] bytes = "private-provider-response".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(429, bytes.length);
+                exchange.getResponseBody().write(bytes);
+            }
+        });
         server.start();
         try (var sink = new PrintStream(OutputStream.nullOutputStream())) {
             var source = Files.writeString(temp.resolve("suite.yaml"), """
@@ -99,6 +107,25 @@ class LlmJudgeScorerTest {
             assertEquals("reference", data.path("reference").asText());
             assertEquals("candidate", data.path("candidate").asText());
             assertEquals("Require all facts", data.path("rubric").asText());
+            assertEquals(1, EvaluationCli.execute(run, sink, sink, null, base + "/rejected", "judge-token"));
+            var entries = new java.util.ArrayList<JsonNode>();
+            try (var logs = Files.list(Path.of(root, "logs"))) {
+                for (Path log : logs.toList()) {
+                    String text = Files.readString(log);
+                    assertFalse(text.contains("judge-token"));
+                    assertFalse(text.contains("private-provider-response"));
+                    assertFalse(text.contains("Missing a required fact"));
+                    for (String line : text.lines().toList()) {
+                        entries.add(JSON.readTree(line));
+                    }
+                }
+            }
+            assertTrue(entries.stream().anyMatch(entry -> entry.path("phase").asText().equals("run validation")
+                    && entry.path("detail").asText().contains("SYMPHONY_EVAL_JUDGE_URL")));
+            assertTrue(entries.stream().anyMatch(entry -> entry.path("caseId").asText().equals("three")
+                    && entry.path("detail").asText().contains("Invalid judge verdict")));
+            assertTrue(entries.stream().anyMatch(entry -> entry.path("caseId").asText().equals("one")
+                    && entry.path("detail").asText().contains("Judge returned HTTP 429")));
 
                 var fallbackSource = Files.writeString(temp.resolve("fallback.yaml"), """
                     version: 1
